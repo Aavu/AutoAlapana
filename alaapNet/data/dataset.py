@@ -47,7 +47,9 @@ class AlapanaDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.transforms(self.data[idx][0]).float(), self.transforms(self.data[idx][1]).float()
+        X = self.transforms(self.data[idx][0]).contiguous().float()
+        y = self.transforms(self.data[idx][1]).contiguous().float()
+        return X, y
 
     def __preprocess_data(self):
         for d in os.listdir(self.pitch_path):
@@ -155,3 +157,8 @@ class AlapanaDataset(Dataset):
                 break
 
         return midi[start_idx: end_idx]
+
+
+class STADataset(Dataset):
+    def __init__(self):
+        super().__init__()

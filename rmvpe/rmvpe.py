@@ -10,13 +10,13 @@ from scipy.signal import get_window
 
 ###stft codes from https://github.com/pseeth/torch-stft/blob/master/torch_stft/util.py
 def window_sumsquare(
-    window,
-    n_frames,
-    hop_length=200,
-    win_length=800,
-    n_fft=800,
-    dtype=np.float32,
-    norm=None,
+        window,
+        n_frames,
+        hop_length=200,
+        win_length=800,
+        n_fft=800,
+        dtype=np.float32,
+        norm=None,
 ):
     """
     # from librosa 0.6
@@ -56,13 +56,13 @@ def window_sumsquare(
     # Fill the envelope
     for i in range(n_frames):
         sample = i * hop_length
-        x[sample : min(n, sample + n_fft)] += win_sq[: max(0, min(n_fft, n - sample))]
+        x[sample: min(n, sample + n_fft)] += win_sq[: max(0, min(n_fft, n - sample))]
     return x
 
 
 class STFT(torch.nn.Module):
     def __init__(
-        self, filter_length=1024, hop_length=512, win_length=None, window="hann"
+            self, filter_length=1024, hop_length=512, win_length=None, window="hann"
     ):
         """
         This module implements an STFT using 1D convolution and 1D transpose convolutions.
@@ -146,7 +146,7 @@ class STFT(torch.nn.Module):
         real_part = forward_transform[:, :cutoff, :]
         imag_part = forward_transform[:, cutoff:, :]
 
-        magnitude = torch.sqrt(real_part**2 + imag_part**2)
+        magnitude = torch.sqrt(real_part ** 2 + imag_part ** 2)
         # phase = torch.atan2(imag_part.data, real_part.data)
 
         return magnitude  # , phase
@@ -197,7 +197,7 @@ class STFT(torch.nn.Module):
             # scale by hop ratio
             inverse_transform *= float(self.filter_length) / self.hop_length
 
-        inverse_transform = inverse_transform[..., self.pad_amount :]
+        inverse_transform = inverse_transform[..., self.pad_amount:]
         inverse_transform = inverse_transform[..., : self.num_samples]
         inverse_transform = inverse_transform.squeeze(1)
 
@@ -276,14 +276,14 @@ class ConvBlockRes(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(
-        self,
-        in_channels,
-        in_size,
-        n_encoders,
-        kernel_size,
-        n_blocks,
-        out_channels=16,
-        momentum=0.01,
+            self,
+            in_channels,
+            in_size,
+            n_encoders,
+            kernel_size,
+            n_blocks,
+            out_channels=16,
+            momentum=0.01,
     ):
         super(Encoder, self).__init__()
         self.n_encoders = n_encoders
@@ -314,7 +314,7 @@ class Encoder(nn.Module):
 
 class ResEncoderBlock(nn.Module):
     def __init__(
-        self, in_channels, out_channels, kernel_size, n_blocks=1, momentum=0.01
+            self, in_channels, out_channels, kernel_size, n_blocks=1, momentum=0.01
     ):
         super(ResEncoderBlock, self).__init__()
         self.n_blocks = n_blocks
@@ -405,13 +405,13 @@ class Decoder(nn.Module):
 
 class DeepUnet(nn.Module):
     def __init__(
-        self,
-        kernel_size,
-        n_blocks,
-        en_de_layers=5,
-        inter_layers=4,
-        in_channels=1,
-        en_out_channels=16,
+            self,
+            kernel_size,
+            n_blocks,
+            en_de_layers=5,
+            inter_layers=4,
+            in_channels=1,
+            en_out_channels=16,
     ):
         super(DeepUnet, self).__init__()
         self.encoder = Encoder(
@@ -436,14 +436,14 @@ class DeepUnet(nn.Module):
 
 class E2E(nn.Module):
     def __init__(
-        self,
-        n_blocks,
-        n_gru,
-        kernel_size,
-        en_de_layers=5,
-        inter_layers=4,
-        in_channels=1,
-        en_out_channels=16,
+            self,
+            n_blocks,
+            n_gru,
+            kernel_size,
+            en_de_layers=5,
+            inter_layers=4,
+            in_channels=1,
+            en_out_channels=16,
     ):
         super(E2E, self).__init__()
         self.unet = DeepUnet(
@@ -455,24 +455,18 @@ class E2E(nn.Module):
             en_out_channels,
         )
         self.cnn = nn.Conv2d(en_out_channels, 3, (3, 3), padding=(1, 1))
-        if n_gru:
-            self.fc = nn.Sequential(
-                BiGRU(3 * 128, 256, n_gru),
-                nn.Linear(512, 360),
-                nn.Dropout(0.25),
-                nn.Sigmoid(),
-            )
-        else:
-            self.fc = nn.Sequential(
-                nn.Linear(3 * nn.N_MELS, nn.N_CLASS), nn.Dropout(0.25), nn.Sigmoid()
-            )
+
+        self.fc = nn.Sequential(
+            BiGRU(3 * 128, 256, n_gru),
+            nn.Linear(512, 360),
+            nn.Dropout(0.25),
+            nn.Sigmoid(),
+        )
 
     def forward(self, mel):
-        # print(mel.shape)
         mel = mel.transpose(-1, -2).unsqueeze(1)
         x = self.cnn(self.unet(mel)).transpose(1, 2).flatten(-2)
         x = self.fc(x)
-        # print(x.shape)
         return x
 
 
@@ -481,16 +475,16 @@ from librosa.filters import mel
 
 class MelSpectrogram(torch.nn.Module):
     def __init__(
-        self,
-        is_half,
-        n_mel_channels,
-        sampling_rate,
-        win_length,
-        hop_length,
-        n_fft=None,
-        mel_fmin=0,
-        mel_fmax=None,
-        clamp=1e-5,
+            self,
+            is_half,
+            n_mel_channels,
+            sampling_rate,
+            win_length,
+            hop_length,
+            n_fft=None,
+            mel_fmin=0,
+            mel_fmax=None,
+            clamp=1e-5,
     ):
         super().__init__()
         n_fft = win_length if n_fft is None else n_fft
@@ -524,19 +518,6 @@ class MelSpectrogram(torch.nn.Module):
                 # "cpu"if(audio.device.type=="privateuseone") else audio.device
                 audio.device
             )
-        # fft = torch.stft(#doesn't support pytorch_dml
-        #     # audio.cpu() if(audio.device.type=="privateuseone")else audio,
-        #     audio,
-        #     n_fft=n_fft_new,
-        #     hop_length=hop_length_new,
-        #     win_length=win_length_new,
-        #     window=self.hann_window[keyshift_key],
-        #     center=center,
-        #     return_complex=True,
-        # )
-        # magnitude = torch.sqrt(fft.real.pow(2) + fft.imag.pow(2))
-        # print(1111111111)
-        # print(222222222222222,audio.device,self.is_half)
         if hasattr(self, "stft") == False:
             # print(n_fft_new,hop_length_new,win_length_new,audio.shape)
             self.stft = STFT(
@@ -546,8 +527,6 @@ class MelSpectrogram(torch.nn.Module):
                 window="hann",
             ).to(audio.device)
         magnitude = self.stft.transform(audio)  # phase
-        # if (audio.device.type == "privateuseone"):
-        #     magnitude=magnitude.to(audio.device)
         if keyshift != 0:
             size = self.n_fft // 2 + 1
             resize = magnitude.size(1)
@@ -555,23 +534,21 @@ class MelSpectrogram(torch.nn.Module):
                 magnitude = F.pad(magnitude, (0, 0, 0, size - resize))
             magnitude = magnitude[:, :size, :] * self.win_length / win_length_new
         mel_output = torch.matmul(self.mel_basis, magnitude)
-        if self.is_half == True:
-            mel_output = mel_output.half()
         log_mel_spec = torch.log(torch.clamp(mel_output, min=self.clamp))
-        # print(log_mel_spec.device.type)
         return log_mel_spec
 
 
 class RMVPE:
-    def __init__(self, model_path, is_half, device=None):
+    def __init__(self, model_path, is_half, hop_size=160, device=None):
         self.resample_kernel = {}
         self.resample_kernel = {}
         self.is_half = is_half
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
+        self.fs = 16000
         self.mel_extractor = MelSpectrogram(
-            is_half, 128, 16000, 1024, 160, None, 30, 8000
+            is_half, 128, self.fs, 1024, hop_size, None, 30, 8000
         ).to(device)
         if "privateuseone" in str(device):
             import onnxruntime as ort
@@ -586,7 +563,7 @@ class RMVPE:
             ckpt = torch.load(model_path, map_location="cpu")
             model.load_state_dict(ckpt)
             model.eval()
-            if is_half == True:
+            if is_half:
                 model = model.half()
             self.model = model
             self.model = self.model.to(device)
@@ -599,15 +576,7 @@ class RMVPE:
             mel = F.pad(
                 mel, (0, 32 * ((n_frames - 1) // 32 + 1) - n_frames), mode="reflect"
             )
-            if "privateuseone" in str(self.device):
-                onnx_input_name = self.model.get_inputs()[0].name
-                onnx_outputs_names = self.model.get_outputs()[0].name
-                hidden = self.model.run(
-                    [onnx_outputs_names],
-                    input_feed={onnx_input_name: mel.cpu().numpy()},
-                )[0]
-            else:
-                hidden = self.model(mel)
+            hidden = self.model(mel)
             return hidden[:, :n_frames]
 
     def decode(self, hidden, thred=0.03):
@@ -617,30 +586,14 @@ class RMVPE:
         # f0 = np.array([10 * (2 ** (cent_pred / 1200)) if cent_pred else 0 for cent_pred in cents_pred])
         return f0
 
-    def infer_from_audio(self, audio, thred=0.03):
-        # torch.cuda.synchronize()
-        t0 = ttime()
-        mel = self.mel_extractor(
-            torch.from_numpy(audio).float().to(self.device).unsqueeze(0), center=True
-        )
-        # print(123123123,mel.device.type)
-        # torch.cuda.synchronize()
-        t1 = ttime()
-        hidden = self.mel2hidden(mel)
-        # torch.cuda.synchronize()
-        t2 = ttime()
-        # print(234234,hidden.device.type)
-        if "privateuseone" not in str(self.device):
-            hidden = hidden.squeeze(0).cpu().numpy()
-        else:
-            hidden = hidden[0]
-        if self.is_half == True:
-            hidden = hidden.astype("float32")
-
+    def infer_from_audio(self, audio, sample_rate, thred=0.03):
+        if sample_rate != self.fs:
+            # resample audio if necessary
+            from resampy import resample
+            audio = resample(audio, sample_rate, self.fs)
+        mel = self.mel_extractor(torch.from_numpy(audio).float().to(self.device).unsqueeze(0), center=True)
+        hidden = self.mel2hidden(mel)[0]
         f0 = self.decode(hidden, thred=thred)
-        # torch.cuda.synchronize()
-        t3 = ttime()
-        # print("hmvpe:%s\t%s\t%s\t%s"%(t1-t0,t2-t1,t3-t2,t3-t0))
         return f0
 
     def to_local_average_cents(self, salience, thred=0.05):
@@ -653,9 +606,10 @@ class RMVPE:
         todo_cents_mapping = []
         starts = center - 4
         ends = center + 5
+
         for idx in range(salience.shape[0]):
-            todo_salience.append(salience[:, starts[idx] : ends[idx]][idx])
-            todo_cents_mapping.append(self.cents_mapping[starts[idx] : ends[idx]])
+            todo_salience.append(salience[:, starts[idx]: ends[idx]][idx])
+            todo_cents_mapping.append(self.cents_mapping[starts[idx]: ends[idx]])
         # t2 = ttime()
         todo_salience = np.array(todo_salience)  # 帧长，9
         todo_cents_mapping = np.array(todo_cents_mapping)  # 帧长，9
@@ -668,27 +622,3 @@ class RMVPE:
         # t4 = ttime()
         # print("decode:%s\t%s\t%s\t%s" % (t1 - t0, t2 - t1, t3 - t2, t4 - t3))
         return devided
-
-
-if __name__ == "__main__":
-    import librosa
-    import soundfile as sf
-
-    audio, sampling_rate = sf.read(r"C:\Users\liujing04\Desktop\Z\冬之花clip1.wav")
-    if len(audio.shape) > 1:
-        audio = librosa.to_mono(audio.transpose(1, 0))
-    audio_bak = audio.copy()
-    if sampling_rate != 16000:
-        audio = librosa.resample(audio, orig_sr=sampling_rate, target_sr=16000)
-    model_path = r"D:\BaiduNetdiskDownload\RVC-beta-v2-0727AMD_realtime\rmvpe.pt"
-    thred = 0.03  # 0.01
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    rmvpe = RMVPE(model_path, is_half=False, device=device)
-    t0 = ttime()
-    f0 = rmvpe.infer_from_audio(audio, thred=thred)
-    # f0 = rmvpe.infer_from_audio(audio, thred=thred)
-    # f0 = rmvpe.infer_from_audio(audio, thred=thred)
-    # f0 = rmvpe.infer_from_audio(audio, thred=thred)
-    # f0 = rmvpe.infer_from_audio(audio, thred=thred)
-    t1 = ttime()
-    print(f0.shape, t1 - t0)

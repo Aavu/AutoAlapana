@@ -16,6 +16,10 @@ class Util:
         return out
 
     @staticmethod
+    def unnormalize_midi(values, midi_key: int):
+        return midi_key + ((values - 1) * 12)
+
+    @staticmethod
     def unpack_filename(filepath: str) -> tuple:
         """
         parse filepath for raga, key and artist
@@ -41,7 +45,7 @@ class Util:
         return x.cpu().detach().numpy()
 
     @staticmethod
-    def zero_lpf(x: torch.Tensor, alpha, device='cpu'):
+    def zero_lpf(x: torch.Tensor, alpha, restore_zeros=True, device='cpu'):
         x0 = torch.clone(x)
         for i in range(1, len(x)):
             x0[i] = (alpha * x0[i - 1]) + ((1 - alpha) * x0[i])
@@ -52,5 +56,47 @@ class Util:
         x0 = torch.flip(x0, dims=(0,))
 
         # restore NULL values
-        x0[x < 0.01] = 0
+        if restore_zeros:
+            x0[x < 0.01] = 0
         return x0
+
+    @staticmethod
+    def js_div(x: np.ndarray, target: np.ndarray, eps=1e-6) -> float:
+        """
+        Jensen-Shannon Divergence
+        :param x: observed distribution
+        :param target: actual distribution
+        :param eps: Small value to make sure result is not nan
+        :return: scalar. 0 -> similar distribution, +ve means distribution diverge
+        """
+        x = torch.from_numpy(x) + eps
+        target = torch.from_numpy(target) + eps
+        p = 0.5 * (x + target)
+        return 0.5 * (torch.nn.functional.kl_div(x.log(), p) + torch.nn.functional.kl_div(target.log(), p)) / np.log(2)
+
+    @staticmethod
+    def bit_crush(x: np.ndarray, bits, max_val):
+        out = x[:]
+        out = out / max_val
+        assert np.min(out) >= 0 and np.max(out) < 1, f"min = {np.min(out)}, max = {np.max(out)}"
+        out *= 2 ** bits
+        out = np.round(out).astype(int)
+        return out
+
+    @staticmethod
+    def histogram(x: np.ndarray, bins):
+        out = np.zeros(bins, dtype=float)
+
+        for i in x:
+            if i >= bins:
+                raise Exception(f"Values exceed bin count, i: {i}, bins: {bins}")
+            out[i] += 1
+
+        out = out / len(x)
+        return out
+
+    @staticmethod
+    def compute_histogram(x, bits, max_val=3.0):
+        x_bit = Util.bit_crush(x, bits=bits, max_val=max_val)
+        hist = Util.histogram(x_bit, bins=2 ** bits)
+        return hist

@@ -120,7 +120,7 @@ class DecoderVanilla(DecoderBase):
 
         output, hidden = self.gru(inputs, hidden)
         output = self.out(torch.cat((output, inputs), dim=2))
-        output = output.reshape(output.shape[0], output.shape[1], self.target_size)
+        output = output.view(output.shape[0], output.shape[1], self.target_size)
         # output: (batch size, 1, num targets, num dist params)
         # hidden: (num gru layers, batch size, hidden size)
         return output, hidden
@@ -160,7 +160,7 @@ class DecoderWithAttention(DecoderBase):
         # Get prediction
         # out input: (batch size, 1, hidden size + hidden size + num targets)
         output = self.out(torch.cat((output, weighted_sum, inputs), dim=2))
-        output = output.reshape(output.shape[0], output.shape[1], self.target_size)
+        output = output.view(output.shape[0], output.shape[1], self.target_size)
 
         # output: (batch size, 1, num targets, num dist params)
         # hidden: (num gru layers, batch size, hidden size)
@@ -188,6 +188,51 @@ class Seq2Seq(nn.Module):
 
         return outputs
 
+
+class ConvNet(nn.Module):
+    def __init__(self, out_seq_len, activation: nn.Module):
+        super().__init__()
+
+        self.conv = nn.ModuleList()
+
+        self.conv.append(nn.Conv1d(in_channels=1, out_channels=8, kernel_size=5, stride=2))
+        self.conv.append(nn.Conv1d(in_channels=8, out_channels=16, kernel_size=5, stride=2))
+        self.conv.append(nn.Conv1d(in_channels=16, out_channels=32, kernel_size=5, stride=2))
+        self.conv.append(nn.Conv1d(in_channels=32, out_channels=64, kernel_size=5, stride=1))
+        self.conv.append(nn.Conv1d(in_channels=64, out_channels=128, kernel_size=5, stride=1))
+
+        self.attn_fc_id = [1, 0, 1, 0, 0]
+
+        assert len(self.conv) == len(self.attn_fc_id)
+
+        self.attn_fc = nn.ModuleList()
+        self.attn_fc.append(nn.Linear(in_features=8 * 48, out_features=128))
+        self.attn_fc.append(nn.Linear(in_features=32 * 9, out_features=128))
+
+        self.fc = nn.Linear(in_features=128, out_features=out_seq_len)
+        self.act = activation
+
+    def forward(self, x: torch.Tensor):
+        batch_size = x.size(0)
+        x = x.permute(0, 2, 1)
+        attn = []
+        k = 0
+        for i in range(len(self.conv)):
+            x = self.conv[i](x)
+            x = self.act(x)
+            if self.attn_fc_id[i] != 0:
+                temp = x.reshape(batch_size, -1)
+                temp = self.attn_fc[k](temp)
+                attn.append(temp)
+                k += 1
+
+        x = x.reshape(x.shape[0], -1)
+        temp = torch.stack(attn, dim=-1)
+        temp = torch.sum(temp, dim=-1)
+        x = x + temp
+        x = self.fc(x)
+        x = self.act(x)
+        return x.reshape(x.shape[0], -1, 1)
 
 # class DecoderCell(nn.Module):
 #     def __init__(self, feature_size, hidden_size, num_layers, dropout_p):
@@ -356,19 +401,22 @@ class Seq2Seq(nn.Module):
 
 
 class Seq2SeqComponent(nn.Module):
-    def __init__(self, feature_size, alpha=0.9, hidden_size=128, num_layers=1, kernel_size=5,
-                 bidirectional_encoder=False):
+    def __init__(self, out_seq_len, alpha=0.9, kernel_size=3):
         super().__init__()
-        self.trend_model = Seq2Seq(feature_size=feature_size,
-                                   hidden_size=hidden_size,
-                                   num_layers=num_layers, dropout_p=0, target_indices=[0])
+        # self.trend_model = Seq2Seq(feature_size=feature_size,
+        #                            hidden_size=hidden_size,
+        #                            num_layers=num_layers, dropout_p=0, target_indices=[0])
 
         # self.trend_model = GamakaNet(input_size=(feature_size, 1), latent_size=hidden_size)
         # self.seasonal_model = GamakaNet(input_size=(feature_size, 1), latent_size=hidden_size)
-        self.seasonal_model = Seq2Seq(feature_size=feature_size,
-                                      hidden_size=hidden_size,
-                                      num_layers=num_layers, dropout_p=0, target_indices=[0])
+        # self.seasonal_model = Seq2Seq(feature_size=feature_size,
+        #                               hidden_size=hidden_size,
+        #                               num_layers=num_layers, dropout_p=0, target_indices=[0])
 
+        self.trend_model = ConvNet(out_seq_len=out_seq_len, activation=nn.ReLU())
+        self.seasonal_model = ConvNet(out_seq_len=out_seq_len, activation=nn.Tanh())
+
+        # self.pool = nn.AvgPool1d(kernel_size=kernel_size, padding=kernel_size // 2)
         # self.seasonal_model = ConvSeq2Seq(feature_size=feature_size,
         #                                hidden_dim=hidden_size,
         #                                num_layers=num_layers,
@@ -378,18 +426,12 @@ class Seq2SeqComponent(nn.Module):
         #                                max_len=5000)
         self.alpha = alpha
 
-    def forward(self, x: torch.Tensor,
-                tokens: List[torch.Tensor] or None = None,
-                target: torch.Tensor or None = None,
-                teacher_force_probability=0.5,
-                max_len=100):
+    def forward(self, x: torch.Tensor):
         trend = Util.zero_lpf(x, self.alpha)
-        seasonal = x - trend
-        trend = self.trend_model(trend)
-        seasonal = self.seasonal_model(seasonal)
-        # trend = self.trend_model(trend, tokens, target, teacher_force_probability, max_len)
-        # seasonal = self.seasonal_model(seasonal, tokens, target, teacher_force_probability, max_len)
-        return trend + seasonal
+        # seasonal = x - trend
+        trend_pred = self.trend_model(x)
+        seasonal = self.seasonal_model(trend)
+        return trend_pred + seasonal
 
 
 class TransformerModel(nn.Module):
