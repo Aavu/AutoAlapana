@@ -86,7 +86,8 @@ class Encoder(nn.Module):
             # if sample rate is not divided by hop_length
             # In short, this is not needed if sr == 16000
             batch["loudness"] = batch["loudness"][:, : batch["f0"].shape[-1]]
-            batch["z"] = batch["z"][:, : batch["f0"].shape[-1]]
+            if self.config.use_z:
+                batch["z"] = batch["z"][:, : batch["f0"].shape[-1]]
 
         return batch
 

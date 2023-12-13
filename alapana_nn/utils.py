@@ -170,6 +170,18 @@ class Util:
         return splits
 
     @staticmethod
+    def split_chunks(audio: ndarray, chunk_size: int):
+        num_chunks = int(np.ceil(len(audio) / chunk_size))
+        chunks = np.zeros((num_chunks, chunk_size))
+        for i in range(len(chunks) - 1):
+            chunks[i] = audio[i * chunk_size: (i + 1) * chunk_size]
+
+        residual_idx = len(audio) - (len(audio) % chunk_size)
+        if residual_idx <= len(audio):
+            chunks[-1] = np.concatenate([audio[residual_idx:], np.zeros((chunk_size - (len(audio) - residual_idx)))])
+        return chunks
+
+    @staticmethod
     def extract_pitch(audio: ndarray, fs, midi_key, pitch_tracker: PitchTrack, threshold=0.01, fill_gaps=True):
         f0 = pitch_tracker.track(audio, fs)
         midi = librosa.hz_to_midi(f0)
@@ -230,7 +242,8 @@ class Util:
         y = x.copy()
         seg = Util.split_phrases(x)
         for s, i in seg:
-            y[i: i + len(s)] = Util.zero_lpf(s, alpha, restore_zeros)
+            temp = Util.zero_lpf(s, alpha, restore_zeros)
+            y[i: i + len(s)] = temp
         return y
 
     @staticmethod
@@ -276,14 +289,15 @@ class Util:
 
     @staticmethod
     def envelope(x: ndarray or torch.Tensor, sample_rate: float, hop_size: int, normalize: bool = True):
+        eps = 1e-6
         # numpy and torch computations return different lengths! Usually len(np_env) - len(torch_env) = 1
         if type(x) == torch.Tensor:
             Zxx = torch.stft(x, n_fft=hop_size * 2, hop_length=hop_size, return_complex=True)
-            env = torch.sum(torch.abs(Zxx), dim=0)
+            env = torch.sum(torch.abs(Zxx), dim=0) + eps
             mav_env = torch.max(env)
         else:
             f, t, Zxx = signal.stft(x, sample_rate, nperseg=hop_size * 2, noverlap=hop_size)
-            env = np.sum(np.abs(Zxx), axis=0)
+            env = np.sum(np.abs(Zxx), axis=0) + eps
             mav_env = np.max(env)
 
         if normalize:
@@ -342,30 +356,44 @@ class Util:
         dips = []
         sil = []
         # move ptr to the first non zero value
-        idx = 1
+        idx = 0
         while idx < len(x) - 1 and x[idx] < eps:
             sil.append(idx)
             idx += 1
 
-        # Always make the first point as part of the sta. If 2nd pt > 1st, it is dip else peak
-        if idx < len(x) - 2:
+        end_idx = len(x) - 1
+        while end_idx > idx and x[end_idx] < eps:
+            sil.append(end_idx)
+            end_idx -= 1
+
+        # Always make the first valid point as part of the sta. If 2nd pt > 1st, it is dip else peak
+        if idx < len(x) - 1:
             if x[idx] < x[idx + 1]:
                 dips.append(idx)
             else:
                 peaks.append(idx)
             idx += 1
 
+        # Always make the last valid point as part of the sta. If 2nd pt > 1st, it is dip else peak
+        if end_idx > idx:
+            if x[end_idx] < x[end_idx - 1]:
+                dips.append(end_idx)
+            else:
+                peaks.append(end_idx)
+            end_idx -= 1
+
         in_silent_region = False
         # Scan the entire contour. If a point is a minima, add to dip. If a point is maxima, add to peak
-        for i in range(idx, len(x) - 1):
-            # First check if the next point is a valid pitch. If not, add this point to sta dip
+        for i in range(idx, end_idx):
+            # First check if the next point is a valid pitch. If not, add current point to sta dip
             if x[i] < eps:
                 if not in_silent_region:
                     dips.append(i - 1)
-                in_silent_region = True
+                    in_silent_region = True
                 sil.append(i)
                 continue
 
+            # If still in silent region but the current point > eps, Add current point to sta
             if in_silent_region:
                 if x[i + 1] > x[i]:
                     dips.append(i)
@@ -377,111 +405,117 @@ class Util:
             if x[i + 1] <= x[i] and x[i] > x[i - 1]:
                 peaks.append(i)
 
-            if x[i + 1] > x[i] and x[i] <= x[i - 1]:
+            elif x[i + 1] > x[i] and x[i] <= x[i - 1]:
                 dips.append(i)
 
-        peaks = np.array(peaks, dtype=int)
-        dips = np.array(dips, dtype=int)
-        sil = np.array(sil, dtype=int)
+        peaks = np.sort(np.array(peaks, dtype=int))
+        dips = np.sort(np.array(dips, dtype=int))
+        sil = np.sort(np.array(sil, dtype=int))
         return peaks, dips, sil
 
     @staticmethod
+    def get_nearest_sta(sta_points: ndarray, idx: int, lower):
+        # find the nearest sta that is before/after given idx.
+        # If there is no sta, then original starting_idx is retained.
+        if lower:
+            for _i in range(len(sta_points) - 1, -1, -1):
+                if sta_points[_i] <= idx:
+                    idx = sta_points[_i]
+                    break
+        else:
+            for _i in range(len(sta_points)):
+                if sta_points[_i] >= idx:
+                    idx = sta_points[_i]
+                    break
+        return idx
+
+    @staticmethod
     def decompose_carnatic_components(x: ndarray,
-                                      sample_rate: float = 16000,
-                                      hop_size: int = 160,
                                       threshold_semitones: float = 0.3,
-                                      min_cp_note_length_ms: int = 80) -> Tuple[
-        ndarray, ndarray, ndarray, List[Tuple[float, int, int]]]:
-        x = x.copy()
-        note_length = int((min_cp_note_length_ms / 1000) / (hop_size / sample_rate))
-
+                                      min_cp_note_length: int = 10,
+                                      min_sub_phrase_length: int = 3,
+                                      first_sta_value: float = None):
         cpn = []
-        eps = 0.1
         peaks, dips, sil = Util.pick_stationary_points(x)
-        raw_sta = np.sort(np.hstack([peaks, dips, sil]))
-        mid_idx = np.zeros_like(raw_sta)
-        mid_x = np.zeros_like(raw_sta, dtype=float)
-        mid_idx[0] = raw_sta[0]
-        mid_x[0] = x[raw_sta[0]]
+        sta = np.sort(np.hstack([peaks, dips]))
+        if len(sta) < 2:
+            return np.array([]), np.array([]), sta, cpn
+        mid_x = np.zeros((len(sta) - 1,))
+        mid_idx = np.zeros_like(mid_x)  # required only for plotting
 
-        for i in range(1, len(raw_sta)):
-            mid_idx[i] = (raw_sta[i] + raw_sta[i - 1]) // 2
-            mid_x[i] = (x[raw_sta[i]] + x[raw_sta[i - 1]]) / 2
+        for i in range(len(mid_x)):
+            if i == 0 and first_sta_value is not None:
+                print(first_sta_value, x[sta[i]])
+                mid_x[i] = (first_sta_value + x[sta[i + 1]]) / 2
+            else:
+                mid_x[i] = (x[sta[i]] + x[sta[i + 1]]) / 2
+            mid_idx[i] = (sta[i] + sta[i + 1]) / 2
 
+        eps = 0.1
         i = 0
         while i < len(mid_x):
-            candidate_cpn_idx = None
+            candidate_idx = None
             j = i + 1
 
-            while j < len(mid_x) \
-                    and abs(mid_x[j] - mid_x[j - 1]) < threshold_semitones \
-                    and mid_x[j] > eps and mid_x[j - 1] > eps:
-
-                if candidate_cpn_idx is None:
-                    candidate_cpn_idx = (mid_idx[j] + mid_idx[j - 1]) // 2
-
+            while j < len(mid_x) and abs(mid_x[j] - mid_x[j - 1]) < threshold_semitones and x[sta[j]] > eps and x[
+                sta[j - 1]] > eps:
+                if candidate_idx is None:
+                    candidate_idx = j - 1
                 j += 1
 
-            if candidate_cpn_idx is not None:
-
-                end_idx = (mid_idx[j - 1] + mid_idx[min(j, len(mid_x) - 1)]) // 2
-                s, e = candidate_cpn_idx, end_idx
+            if candidate_idx is not None:
+                j1 = min(len(sta) - 1, j)
+                s, e = sta[candidate_idx], sta[j1]
                 l = e - s
-                if l >= note_length:
-                    note = np.median(x[candidate_cpn_idx: end_idx])
-                    cpn.append((note, s, e))
+                if l >= min_cp_note_length and len(sta[candidate_idx: j1]) > 2:
+                    note = np.median(x[s: e])
+                    appended = False
+                    if len(cpn) > 0:
+                        n0, s0, l0 = cpn[-1]
+                        if (s + l) - (s0 + l0) < min_sub_phrase_length and abs(note - n0) < threshold_semitones:
+                            cpn[-1] = ((n0 + note) / 2, s0, l0 + l)
+                            appended = True
 
+                    if not appended:
+                        cpn.append((note, s, l))
+                    sta[candidate_idx: j1] = -1
             i = j
 
-        if len(cpn) == 0:
-            return mid_x, mid_idx, raw_sta, cpn
-        # now filter raw sta's by removing sta's that are part of cpn
-        sta = []
+        # handle last idx of sta
+        if len(cpn) > 0:
+            n0, s0, l0 = cpn[-1]
+            if s0 <= sta[-1] <= s0 + l0:
+                sta[-1] = -1
 
-        internal_eps = threshold_semitones * 1.5
+        sta = sta[sta > -1]
+        return mid_x, mid_idx, sta, cpn
 
-        # Handle sta's before the first cpn
-        n, s, e = cpn[0]
-        sta.extend(list(raw_sta[raw_sta < s]))
+        #     if candidate_idx is not None:
+        #         j1 = min(len(sta) - 1, j)
+        #         s, e = sta[candidate_idx], sta[j1]
+        #         l = e - s
+        #         if l >= min_cp_note_length and len(sta[candidate_idx: j1 + 1]) > 2:
+        #             note = np.median(x[s: e])
+        #
+        #             appended = False
+        #             # if len(cpn) > 0:
+        #             #     n0, s0, l0 = cpn[-1]
+        #             #     if (s + l) - (s0 + l0) < min_sub_phrase_length and abs(note - n0) < threshold_semitones:
+        #             #         cpn[-1] = ((n0 + note) / 2, s0, l0 + l)
+        #             #         appended = True
+        #
+        #             if not appended:
+        #                 cpn.append((note, s, l))
+        #
+        #             sta[candidate_idx: j1 + 1] = -1
+        #     i = j
+        #
 
-        for i in range(len(cpn) - 1):
-            n, s1, e = cpn[i]
-            n1, s, e1 = cpn[i + 1]
-
-            temp = raw_sta[raw_sta > e]
-            sta.extend(list(temp[temp < s]))
-            cpn[i] = (n, s1, e)
-            cpn[i + 1] = (n1, s, e1)
-
-        # Handle sta's after the last cpn
-        n, s, e = cpn[-1]
-        # e = expand(int(e), n, internal_eps, stop=len(x))
-        # cpn[-1] = (n, s, e)
-        sta.extend(list(raw_sta[raw_sta > e]))
-
-        final_cpn = [cpn[0]]
-        for i in range(1, len(cpn)):
-            n, s, e = cpn[i]
-            n1, s1, e1 = final_cpn[-1]
-
-            if abs(n - n1) < internal_eps:
-                if s - e1 <= 2:
-                    final_cpn[-1] = ((n + n1) / 2, s1, e)
-                    continue
-            final_cpn.append(cpn[i])
-
-        # convert end idx to lengths in cpn
-        for i in range(len(final_cpn)):
-            n, s, e = final_cpn[i]
-            final_cpn[i] = (n, s, (e - s))
-
-        return mid_x, mid_idx, np.array(sta), final_cpn
 
     @staticmethod
     def split_phrases(_x: np.ndarray, num_zeros: int = 5, min_phrase_length: int = 20, eps: float = 0.1):
         _phrases = []
 
-        last_cp_idx = 0
         i = 0
         while i < len(_x):
             phrase_start_idx = None
@@ -496,13 +530,14 @@ class Util:
             # If there is a potential phrase and the length of that phrase is > 0
             if phrase_start_idx is not None and j - phrase_start_idx > 0:
                 # If the gap between the last phrase and this one is too small, it is probably the same phrase
-                if phrase_start_idx - (i - 1) < num_zeros:
+                if phrase_start_idx - (i - 1) < num_zeros and len(_phrases) > 0:
                     # If the last phrase is too short, simply neglect it
                     if len(_phrases[-1][0]) < min_phrase_length:
                         _phrases[-1] = (_x[phrase_start_idx: j], phrase_start_idx)
                     else:
                         # include the gap in the phrase by filling with linear interpolation
-                        itp = np.linspace(_x[i - 1], _x[phrase_start_idx], phrase_start_idx - (i - 1), endpoint=False)
+                        itp = np.linspace(_x[i - 1], _x[phrase_start_idx], phrase_start_idx - (i - 1) - 1,
+                                          endpoint=False)
                         _phrases[-1] = (
                             np.concatenate([_phrases[-1][0], itp, _x[phrase_start_idx: j]]), _phrases[-1][1])
 
@@ -539,7 +574,7 @@ class Util:
     @staticmethod
     def model_periodic_signal(x: ndarray,
                               time_period,
-                              max_freq: float = 14) -> Tuple[float, float, float]:
+                              max_freq: float = 20) -> Tuple[float, float, float]:
         """
         Given a periodic signal, estimate it's frequency, phase and amplitude
         :param x: periodic signal
@@ -557,7 +592,7 @@ class Util:
             return f, a, phi
 
         if len(peaks) == 1 and len(dips) == 1:
-            f0 = abs(peaks[0] - dips[0]) / 2
+            f0 = 1 / (abs(peaks[0] - dips[0]) * 2 * time_period)
             f = f0 if f0 < max_freq else f
 
         # There can be cases when there's only 1 peak but > 1 dips.
@@ -570,8 +605,18 @@ class Util:
         # print(peaks, dips)
         # print(temp_peaks)
 
+        # 1 pitch = h samples
+        # 1 sample = 1/fs sec
+        # 1 pitch = h/fs sec = 1 tp
+        # t pitches = t * tp sec
+        # f = 1 / t = 1 / (t * tp) hz = fs / (t * h)
+
+        # h = 160, fs = 16000 -> t = 10.846153846153847, tp = 0.01
+        # h = 128, fs = 16000 -> t = 13.538461538461538, tp = 0.008
+        # h = 80, fs = 16000 -> t = 17.8, tp = 0.005
+        # h = 64, fs = 16000 -> t = 17.526315789473685, tp = 0.004
         if len(temp_peaks) > 1:
-            f0 = np.mean(np.diff(temp_peaks))
+            f0 = 1 / (np.mean(np.diff(temp_peaks)) * time_period)
             f = f0 if f0 < max_freq else f
         a = (np.mean(x[peaks]) - np.mean(x[dips])) / 2
         m = x[1] - x[0]
@@ -584,14 +629,222 @@ class Util:
         return f, a, phi
 
     @staticmethod
-    def generate_lfo(note, length, hop, freq, vibrato_amplitude, amplitude, phase):
-        t = np.linspace(0, length / hop, length)
+    def generate_lfo(note, length, time_period, freq, vibrato_amplitude, amplitude, phase):
+        t = np.linspace(0, length * time_period, length)
         lfo = note + (vibrato_amplitude * np.sin(2 * np.pi * freq * t + phase)).reshape(-1, 1)
         _env = np.ones_like(lfo) * amplitude
         return np.concatenate([lfo, _env], axis=-1)
 
     @staticmethod
-    def generate_cp_like(x: ndarray, note, hop, amplitude, length):
-        f, a, phi = Util.model_periodic_signal(x, time_period=(1 / hop))
+    def generate_cp_like(x: ndarray, note, time_period, amplitude, length):
+        f, a, phi = Util.model_periodic_signal(x, time_period=time_period)
+        f = f / 2  # this seems to be good for listening
         print(f"f: {f}, a: {a}, phi: {phi}")
-        return Util.generate_lfo(note, length, hop, f, a, amplitude, phi)
+        return Util.generate_lfo(note, length, time_period, f, a, amplitude, phi), f, a, phi
+
+    @staticmethod
+    def generate_accompaniment_for_phrase(phrase: np.ndarray,
+                                          cp_notes: List[Tuple[float, int, int]],
+                                          sta_pts: np.ndarray,
+                                          pitch_track_hop_size: int = 160,
+                                          sample_rate: float = 16000,
+                                          max_len: int = 2500):
+        """
+        Generate accompaniment as pitch contour for a single phrase given its corresponding cp_notes
+        :param phrase: Pitch contour and loudness curve of the phrase. Shape (N, 2)
+        :param cp_notes: Constant-Pitch notes of the phrase
+        :param sta_pts: The stationary points of the phrase
+        :param pitch_track_hop_size: Hop size used during pitch tracking
+        :param sample_rate: Audio sample rate
+        :param max_len: Maximum possible length of accompaniment.
+        :return: Accompaniment as a pitch contour with the same hop size as the input
+        """
+
+        # hyperparameters
+        full_phrase_repeat_length_sec = 2.5
+        AMPLITUDE_DURING_SINGING = 0.15
+        min_cp_length_sec = 0.75
+        min_sub_phrase_length_sec = 0.5
+        follow_phrase_length_sec = 2.45
+        max_accompaniment_response_sec = 0.25
+        fade_length_sec = 0.5
+        subphrase_to_cp_ratio = 6
+
+        # The minimum length of the accompaniment is the length of phrase
+        acmp = np.zeros((max_len, 2))
+
+        assert full_phrase_repeat_length_sec > follow_phrase_length_sec
+
+        def add_fade(_phrase: np.ndarray, length_sec, fade_out=False):
+            out = _phrase.copy()
+            fade_length = min(int(length_sec / seconds_per_pitch), len(_phrase) // 2)
+            fade_mask = np.linspace(0, 1., fade_length)
+            fade_out_mask = np.array([])
+            if fade_out:
+                fade_out_mask = np.flip(fade_mask)
+
+            _mask = np.concatenate([fade_mask,
+                                    np.ones((len(_phrase) - len(fade_mask) - len(fade_out_mask),)),
+                                    fade_out_mask])
+
+            if len(_phrase.shape) == 2:
+                out[:, 1] = _phrase[:, 1] * _mask
+            elif len(_phrase.shape) == 1:
+                out = _phrase * _mask
+            else:
+                raise RuntimeError("Num dimensions can be at most be 2...")
+            return out
+
+        # each sample in pitch is hop samples (160). each second is fs samples (16000)
+        # sec / pitch = (samples / pitch) / (samples / sec)
+        seconds_per_pitch = pitch_track_hop_size / sample_rate  # 160 / 16000 = 0.01
+        max_response_fill_length = int(max_accompaniment_response_sec / seconds_per_pitch)
+        assert max_response_fill_length > 0
+
+        follow_phrase_length = follow_phrase_length_sec / seconds_per_pitch  # 1 / 0.01 = 100 pitch samples per sec
+        full_phrase_repeat_length = int(full_phrase_repeat_length_sec / seconds_per_pitch)
+
+        # if a phrase is short, play it completely.
+        if len(phrase) < full_phrase_repeat_length:
+            phrase = add_fade(phrase, fade_length_sec / 4, fade_out=True)
+            return np.concatenate([np.zeros((len(phrase), 2)), phrase], axis=0)
+
+        # print(f"Phrase length ({len(phrase)}) > phrase repeat length ({full_phrase_repeat_length})")
+
+        print(f"raw cp: {cp_notes}")
+        # filter cp_notes and keep only cp larger than min_cp_length
+        min_cp_length = int(min_cp_length_sec / seconds_per_pitch)
+        filtered_cp = []
+        for i, c in enumerate(cp_notes):
+            if c[2] >= min_cp_length:  # or i == len(cp_notes) - 1:
+                _a, _b, _c = c
+                filtered_cp.append((c[0], c[1], c[2]))
+        cp_notes = filtered_cp
+
+        # If there are no cp notes after filtering and the phrase is longer,
+        # play the last n seconds of the phrase
+        if len(cp_notes) == 0:
+            # Play the last 100 pitches
+            # Start from the nearest sta to make sure the starting velocity is 0
+            starting_idx = (len(phrase) - 1) - int(follow_phrase_length)
+            starting_idx = Util.get_nearest_sta(sta_pts, starting_idx, lower=True)
+            temp = add_fade(phrase[starting_idx:], fade_length_sec / 2, fade_out=True)
+            return np.concatenate([np.zeros((len(phrase), 2)), temp],
+                                  axis=0)
+
+        # If both the above cases are not satisfied, there is at least 1 cp-note that is long enough
+        # Get all phrases inbetween cp. Including before and after the first and last cp respectively
+
+        # Append phrase before the first cp
+        bw_phrase_idx = [(0, cp_notes[0][1])]
+
+        for i in range(len(cp_notes) - 1):
+            _s = cp_notes[i][1] + cp_notes[i][2]
+            _e = cp_notes[i + 1][1]
+            bw_phrase_idx.append((_s, _e))
+
+        cp = cp_notes[-1]
+
+        min_sub_phrase_length = int(min_sub_phrase_length_sec / seconds_per_pitch)
+        _s, _e = cp[1] + cp[2], len(phrase)
+
+        # If the last sub-phase is too short, it's most likely a tracking glitch. So include it in the cp-note.
+        if _e - _s < min_sub_phrase_length:
+            cp_notes[-1] = (cp[0], cp[1], cp[2] + (_e - _s))
+            bw_phrase_idx.append((_s, _s))
+        else:
+            bw_phrase_idx.append((_s, _e))
+
+        print(f"cp notes: {cp_notes}")
+        print(f"b/w phrase indices: {bw_phrase_idx}")
+
+        # This ptr is used to move to the right index in the acmp output when filling in values
+        ptr = max_response_fill_length
+        for i in range(len(cp_notes)):
+            # i'th phrase in bw_phrases comes before i'th cp.
+            cp = cp_notes[i]
+            _s, _e = bw_phrase_idx[i]
+            sub_phrase_length = _e - _s
+            cp_start_idx = cp[1]
+            cp_end_idx = cp[1] + cp[2]
+            is_last = cp_end_idx >= len(phrase) - 1
+
+            # play the last cp during sub-phrase singing
+            if i > 0:
+                prev_cp = cp_notes[i - 1]
+                temp, f, a, phi = Util.generate_cp_like(phrase[prev_cp[1]: prev_cp[1] + prev_cp[2], 0],
+                                                        prev_cp[0], seconds_per_pitch,
+                                                        AMPLITUDE_DURING_SINGING, sub_phrase_length)
+                adj_ratio = (-8 * (a ** 2)) + (2 * a) + 10
+                # print(f"Adjusted ratio: {adj_ratio}, a: {a}")
+                if sub_phrase_length / prev_cp[2] < adj_ratio:
+                    acmp[ptr: ptr + sub_phrase_length] = temp
+            ptr += sub_phrase_length
+
+            sub_phrase = np.zeros((0, 2))
+            temp_cp = np.zeros((0, 2))
+
+            # We need to keep playing until the cp-note is held.
+            # If the sub-phrase is too short, dont play the sub-phrase. Just play the cp-note starting from sub-phrase
+            if sub_phrase_length < min_sub_phrase_length:
+                temp_cp = phrase[_s: cp_end_idx]
+                if acmp[ptr - 1, 0] < 0.1:
+                    temp_cp = add_fade(temp_cp, fade_length_sec)
+                print("here1")
+
+            # if sub-phrase is shorter than cp-note length or if this cp extends till the last idx,
+            # play the full sub-phrase
+            elif sub_phrase_length <= cp[2] or is_last:
+                _s = Util.get_nearest_sta(sta_pts, _s, lower=True)
+                sub_phrase = phrase[_s: _e]
+                _end_idx = len(phrase) if is_last else cp_end_idx - len(sub_phrase)
+                temp_cp = phrase[cp_start_idx: _end_idx]
+                if acmp[ptr - 1, 0] < 0.1:
+                    sub_phrase = add_fade(sub_phrase, fade_length_sec)
+                print("here2")
+
+            # Since cp-note is shorter, play only the last n seconds of the sub-phrase.
+            # But if sub-phrase is too long for cp, just play the cp
+            else:
+                _start_idx = _e - cp[2] if sub_phrase_length / cp[2] < subphrase_to_cp_ratio else cp_start_idx
+                _start_idx = Util.get_nearest_sta(sta_pts, _start_idx, lower=True)
+                print(_start_idx, cp_end_idx)
+                sub_phrase = phrase[_start_idx: cp_end_idx]
+                if acmp[ptr - 1, 0] < 0.1:
+                    sub_phrase = add_fade(sub_phrase, fade_length_sec)
+                print("here3")
+
+            acmp[ptr: ptr + len(sub_phrase)] = sub_phrase
+            ptr += len(sub_phrase)
+            acmp[ptr: ptr + len(temp_cp)] = temp_cp
+            ptr += len(temp_cp)
+
+        # handle last phrase if any
+        _s, _e = bw_phrase_idx[-1]
+        sub_phrase_length = _e - _s
+        cp_length = _e - ptr
+        if sub_phrase_length > min_sub_phrase_length and cp_length > 0:
+            prev_cp = cp_notes[-1]
+            temp, f, a, phi = Util.generate_cp_like(phrase[prev_cp[1]: prev_cp[1] + prev_cp[2], 0],
+                                                    prev_cp[0], seconds_per_pitch,
+                                                    AMPLITUDE_DURING_SINGING, cp_length)
+            adj_ratio = (-8 * (a ** 2)) + (2 * a) + 10
+            # print(f"Adjusted ratio: {adj_ratio}, a: {a}")
+            if cp_length / prev_cp[2] < adj_ratio:
+                acmp[ptr: ptr + cp_length] = temp
+                ptr += cp_length
+
+        ptr = max(ptr, len(phrase) - 1)
+
+        acmp = acmp[:ptr]
+        if sub_phrase_length > min_sub_phrase_length:
+            _s = Util.get_nearest_sta(sta_pts, _s, lower=True)
+            sub_phrase = phrase[_s: _e]
+            # Add fade ins
+            if acmp[ptr - 1, 0] < 0.1:
+                sub_phrase = add_fade(sub_phrase, fade_length_sec)
+            acmp = np.concatenate([acmp, sub_phrase], axis=0)
+
+        acmp[:, 0] = Util.segmented_zero_lpf(acmp[:, 0], 0.4)
+        acmp[:, 1] = Util.zero_lpf(acmp[:, 1], 0.5, restore_zeros=False)
+        return acmp
