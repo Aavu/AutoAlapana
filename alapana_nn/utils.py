@@ -490,28 +490,6 @@ class Util:
         sta = sta[sta > -1]
         return mid_x, mid_idx, sta, cpn
 
-        #     if candidate_idx is not None:
-        #         j1 = min(len(sta) - 1, j)
-        #         s, e = sta[candidate_idx], sta[j1]
-        #         l = e - s
-        #         if l >= min_cp_note_length and len(sta[candidate_idx: j1 + 1]) > 2:
-        #             note = np.median(x[s: e])
-        #
-        #             appended = False
-        #             # if len(cpn) > 0:
-        #             #     n0, s0, l0 = cpn[-1]
-        #             #     if (s + l) - (s0 + l0) < min_sub_phrase_length and abs(note - n0) < threshold_semitones:
-        #             #         cpn[-1] = ((n0 + note) / 2, s0, l0 + l)
-        #             #         appended = True
-        #
-        #             if not appended:
-        #                 cpn.append((note, s, l))
-        #
-        #             sta[candidate_idx: j1 + 1] = -1
-        #     i = j
-        #
-
-
     @staticmethod
     def split_phrases(_x: np.ndarray, num_zeros: int = 5, min_phrase_length: int = 20, eps: float = 0.1):
         _phrases = []
